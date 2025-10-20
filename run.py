@@ -8,6 +8,41 @@ from collections import deque
 from env import RobotSuiteEnv
 from train import Train
 from tqdm import tqdm
+
+
+
+import wandb
+
+def log_wandb_video_from_hw3(frames_hw3_list, step, key="media/rollout", fps=20):
+    """
+    frames_hw3_list: list of np.uint8 frames shaped (H, W, 3) in RGB
+    Logs directly to W&B without saving any file locally.
+    """
+    if not frames_hw3_list:
+        return
+    # Stack -> THWC
+    frames_thwc = np.stack(frames_hw3_list, axis=0).astype(np.uint8)           # [T, H, W, 3]
+    
+
+#     W&B expects NumPy videos as (T, C, W, H) by default (yes, W then H)
+    frames_tchw = np.transpose(frames_thwc, (0, 3, 1, 2))
+    wandb.log({key: wandb.Video(frames_tchw, fps=fps, format="mp4")}, step=step)
+
+def init_wandb(cfg):
+    run = wandb.init(
+        project=os.getenv("WANDB_PROJECT", "mydreamerv2"),
+        entity=os.getenv("WANDB_ENTITY", None),
+        name=cfg.get("run_name", None),
+        config=cfg,                 # your args/hparams dict
+        mode=os.getenv("WANDB_MODE", "online"),  # set WANDB_MODE=offline if needed
+        id=os.getenv("WANDB_RUN_ID"),            # optional: support resume
+        resume=os.getenv("WANDB_RESUME", None),  # e.g., "allow" or "must"
+        save_code=True,            # uploads your code for reproducibility
+    )
+    wandb.run.log_code(".")        # attach current code snapshot
+    return run
+
+
 info = {'deter_size':400,
         'class_size':32, 
         'category_size':32,
@@ -38,19 +73,12 @@ info = {'deter_size':400,
         'target_const':1,
         'exp_info':{'train_noise':0.3, 'eval_noise':0.0, 'expl_min':0.1, 'expl_decay':200000.0, 'expl_type':'epsilon_greedy'}}
 
-
+wandb_run = init_wandb(info)
 
 device = "mps" if torch.backends.mps.is_available( ) else "cpu"
 print(f"Device: {device}")
 
-###
-start = time.time()
-def rmean(buf): 
-    return float(np.mean(buf))
 
-kl_hist, rew_hist, cont_hist, obs_hist, mse_hist, act_hist, val_hist = [deque(maxlen=100) for _ in range(7)]
-ret_hist = deque(maxlen=100)
-###
 
 train = Train(info)
 env = RobotSuiteEnv(env_name='Lift', robot="Panda", output_obs=info['obs_shape'])
@@ -64,67 +92,44 @@ scores = []
 done = False
 encoder = train.encoder
 decoder = train.decoder
-obsList = []
+frames = []
+frame_rssm = []
 actor = train.actorModel
 
 train_ep = 0
 obs, score = env.reset(), 0
 train_steps = int(5e6)
-train_every = 14
-train_seed = 500
+train_every = 10
+seed = 51
 target_update = 100
-bar = tqdm(total=train_steps-1, dynamic_ncols=True)
 
-it = 0
-while True:
-        path = f'test_{it}'
-        if not os.path.exists(path):
-                break
-        it += 1
-os.mkdir(path)
-print(f"Folder {path} created successfully")
+
 
 for iter in range(1, train_steps):
     
     # training last
-    if iter>train_seed  and iter%train_every == 0:
-                kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss = train.train_batch()
-        #     print("-"*32+"\n")
-        #     print(f"kl_loss:{kl_loss}, reward_loss:{reward_loss}, cont_loss:{cont_loss}, obs_loss:{obs_loss}, perpix_mse:{perpix_mse}")
-                kl_hist.append(float(kl_loss.detach().item()))
-                rew_hist.append(float(reward_loss.detach().item()))
-                cont_hist.append(float(cont_loss.detach().item()))
-                obs_hist.append(float(obs_loss.detach().item()))
-                mse_hist.append(float(perpix_mse))
-                act_hist.append(float(actor_loss.detach().item()))
-                val_hist.append(float(value_loss.detach().item()))
-                bar.set_description_str(
-                f"it {iter}/{train_steps}  ep {train_ep}"
-                )
-                bar.set_postfix({
-                "kl":   f"{rmean(kl_hist):.4f}",
-                "rew":  f"{rmean(rew_hist):.4f}",
-                "cont": f"{rmean(cont_hist):.4f}",
-                "obs":  f"{rmean(obs_hist):.1f}",
-                "mse":  f"{rmean(mse_hist):.4f}",
-                "actor": f"{rmean(act_hist):.4f}",
-                "value": f"{rmean(act_hist):.4f}",
-                "R̄100": f"{rmean(ret_hist):.2f}",
-        })
+    if iter>seed  and iter%train_every == 0:
+                total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss = train.train_batch()
+    
+                wandb.log({
+                        "loss/total": float(total_loss.detach()),
+                        "loss/kl": float(kl_loss),
+                        "loss/reward": float(reward_loss),
+                        "loss/cont": float(cont_loss),
+                        "loss/obs": float(obs_loss),
+                        "loss/actor": float(actor_loss),
+                        "loss/value": float(value_loss),
+                        
+                        }, step=iter)
+        
     if iter%target_update == 0:
             train.update_target()
         
-#     if iter%train_every == 0:
-#             print(f'{iter}: train ')
-#             kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse = train.train_batch()
-#             print("-"*32+"\n")
-#             print(f"kl_loss:{kl_loss}, reward_loss:{reward_loss}, cont_loss:{cont_loss}, obs_loss:{obs_loss}, perpix_mse:{perpix_mse}")
-#     if iter%target_update == 0:
-#             train.update_target()
+
         
             
     with torch.no_grad():
-        obs = obs.to(device, dtype=torch.float32) / 255.0
+        obs = obs.to(device, dtype=torch.float32) 
         embed = encoder(obs).unsqueeze(0).to(device)
         
         
@@ -135,45 +140,54 @@ for iter in range(1, train_steps):
         _, post_state = rssm.rssm_obs(embed, prev_action, cont , prev_state)
         model_state = rssm.get_state(post_state).to(device)
         action, action_dist = actor(model_state)
-        # action = actor.add_expl(action, iter).detach()
         action = action.detach()
         scores.append(score)
-        obsList.append(env.render())
+        frames.append(env.render())
     
     next_obs, reward, done, _ = env.step(action.squeeze(0).cpu().numpy())
+    
     if done:
+
         train_ep += 1
-        # print(f"{train_ep}: Done")
-        ret_hist.append(float(score))
-        bar.write(f"episode {train_ep}: return {score:.2f} (mean100 {rmean(ret_hist):.2f})")
+        done_ = True
+        buffer.add(obs, action.squeeze(0).cpu(), reward, done_)
+        if len(frames) > 0:
+            log_wandb_video_from_hw3(frames, step=iter, key="media/rollout", fps=20)
 
-        buffer.add(obs, action.squeeze(0).cpu(), reward, not done)
-        obs, score = env.reset(), 0
-        done = False
-        prev_state = rssm._init_rssm(1)
-
-        # print('NEW VIDEO')
-        # print('-'*32)
-        # imageio.mimwrite(f"trainer_{iter}.mp4", obsList, fps=16)
-        if len(obsList) > 0:
-            try:
-                imageio.mimwrite(f"{path}/trainer_{iter}.mp4", obsList, fps=16)
-                bar.write(f"[video] trainer_{iter}.mp4 saved")
-            except Exception:
-                pass
-            try:
-                path = train.record_imagination(env, out_path=f"imagination_{it}.mp4",
-                                                seed_steps=8, horizon=200, fps=20)
-                print(f"[video] {path} saved")
-            except Exception as e:
-                print(f"[viz] skipped imagination: {e}")
-        obsList = []
-    else:
+        frames = []
         
-        buffer.add(obs, action.squeeze(0).cpu(), reward, not done)
+        
+        with torch.no_grad():
+                rssm.eval(); train.decoder.eval()
+                imag_state, imag_log_probs, _= rssm.rollout_imag(info['horizon'] , actor, prev_state)
+                
+                imag_modelstate = train.rssm.get_state(imag_state)
+                obs_dist = train.decoder(imag_modelstate)
+                obs_mean = getattr(obs_dist, "mean")  # [T, B, C, H, W]
+                obs_mean = obs_mean + 0.5
+
+                for t in range(len(obs_mean)):
+                        frame = (obs_mean[t, 0].clamp(0, 1) * 255).to(torch.uint8)
+                        frame = frame.permute(1, 2, 0).cpu().numpy() 
+                        frame_rssm.append(frame)
+                log_wandb_video_from_hw3(frame_rssm, step=iter, key="media/rollout_rssm", fps=20)
+        frame_rssm = []
+        
+        obs, score = env.reset(), 0
+        prev_state = rssm._init_rssm(1)
+        prev_action = torch.tensor(env.action_space.sample()).unsqueeze(0).to(device=device)
+        done = False
+        continue
+    else:
+        done_ = bool(done)
+        buffer.add(obs, action.squeeze(0).cpu(), reward, done_)
         obs = next_obs
         prev_state = post_state
         prev_action = action
         score += reward
-    bar.update(1)
+        
+    wandb.log({
+        "train/episode_return": score,
+        
+        }, step=iter)
 print(np.mean(scores))

@@ -69,7 +69,7 @@ class Decoder(nn.Module):
             nn.ConvTranspose2d(depth*2, depth, kernel, stride=2, padding=1),
             activation,
             nn.ConvTranspose2d(depth, C, kernel,  stride=2, padding=1),
-            activation
+            
         )
     
     def forward(self, x):

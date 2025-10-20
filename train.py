@@ -15,7 +15,7 @@ importlib.reload(actor)
 from actor import ActorModel
 
 importlib.reload(buffer)
-from buffer import Buffer
+from buffer import Buffer, EpisodicBuffer
 
 importlib.reload(rssm)
 from rssm import RSSM
@@ -132,7 +132,7 @@ class Train():
         
         self.actor_optim.step()
         self.value_optim.step()
-        return (kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss)
+        return (total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss)
         
     def value_loss(self, imag_modelstate, discount, lambda_return):
         with torch.no_grad():
@@ -154,8 +154,8 @@ class Train():
         embedding_size = self.info['embedding_size']
         rssm_node_size = self.info['rssm_node_size']
         
-        self.buffer = Buffer(self.info['capacity'], obs_shape, actor_size, self.info['seq_len'], self.info['batch_size'], self.device)
-        
+        # self.buffer = Buffer(self.info['capacity'], obs_shape, actor_size, self.info['seq_len'], self.info['batch_size'], self.device)
+        self.buffer = EpisodicBuffer(self.info['capacity'], obs_shape, actor_size, self.info['seq_len'], self.info['batch_size'], self.device)
         self.rssm = RSSM(self.stoch_size, self.deter_size, actor_size, rssm_node_size, embedding_size, self.info).to(self.device)
         # self.rssm = torch.compile(self.rssm)
         
@@ -253,56 +253,3 @@ class Train():
         
         
         
-    def record_real_vs_recon(self, env, out_path="eval_recon.mp4", max_steps=300, fps=20, mean_action=True):
-        frames = []
-        obs, _ = env.reset()
-        real = obs["image"] if isinstance(obs, dict) and "image" in obs else obs
-        act_dim = int(np.prod(getattr(env.action_space, "shape", (0,))))
-
-        # init latent state & prev action (adapt the initializer name if different in your rssm.py)
-        try:
-            state = self.rssm.initial_state(batch_size=1, device=self.device)
-        except Exception:
-            try:
-                state = self.rssm.initial(1, device=self.device)
-            except Exception:
-                state = self.rssm.init_state(batch_size=1, device=self.device)
-        prev_action = torch.zeros(1, act_dim, device=self.device)
-
-        step, done = 0, False
-        with no_grad():
-            while step < max_steps and not done:
-                # to tensor [1,1,3,H,W] in [0,1]
-                frame = torch.from_numpy(real).to(self.device)
-                if frame.dtype != torch.float32:
-                    frame = frame.float()
-                if frame.max() > 1.0:
-                    frame = frame / 255.0
-                frame = frame.permute(2,0,1).unsqueeze(0).unsqueeze(0)
-
-                embed = self.encoder(frame)                                   # [1,1,E]
-                post, _ = self.rssm.obs_step(state, prev_action, embed)       # posterior
-                state = post
-                latent = torch.cat([post["stoch"], post["deter"]], dim=-1)    # [1,1,D]
-                recon = self.decoder(latent).mean.clamp(0,1)                  # [1,1,3,H,W]
-                recon_np = (recon.squeeze(0).squeeze(0).permute(1,2,0).cpu().numpy()*255).astype(np.uint8)
-
-                # policy action
-                dist = self.actorModel(latent.squeeze(0).squeeze(0))
-                act = (dist.mean if mean_action else dist.rsample()).clamp(-1,1)
-                a_env = act.detach().cpu().numpy()
-
-                # env step
-                obs, _, term, trunc, _ = env.step(a_env)
-                done = bool(term or trunc)
-                real = obs["image"] if isinstance(obs, dict) and "image" in obs else obs
-                real_np = real if isinstance(real, np.ndarray) else np.array(real)
-                if real_np.max() <= 1:
-                    real_np = (real_np*255).astype(np.uint8)
-
-                frames.append(np.concatenate([real_np, recon_np], axis=1))     # [H, 2W, 3]
-                prev_action = act.unsqueeze(0)
-                step += 1
-
-        imageio.mimsave(out_path, frames, format="mp4", fps=fps)
-    

@@ -57,18 +57,7 @@ class ActorModel(nn.Module):
             dist = Normal(mean, std)
             dist = TransformedDistribution(dist, TanhTransform(cache_size=1))
             return SampleDist(Independent(dist, 1))
-    def add_expl(self, action, itr, mode='train'):
-        if mode == "train":
-            expl = self.train_noise - itr/self.expl_decay
-            expl = max(self.expl_min, expl)
-        
-        if mode == "eval":
-            expl = self.eval_noise
-            
-        if expl > 0:
-            noise = torch.randn_like(action) * expl
-            action = torch.clamp(action + noise, -1.0, 1.0)
-        return action
+
     
     def forward(self, state):
         action_dist = self.get_dist(state)
