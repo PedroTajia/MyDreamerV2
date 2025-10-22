@@ -3,19 +3,26 @@ from torch import nn
 import torch.distributions as td
 import numpy as np
 class Encoder(nn.Module):
-    def __init__(self, input_shape, embed_dim, depth=32, kernel=4, activation = nn.ELU()):
+    def __init__(self, input_shape, embed_dim, depth=32, kernel=4, activation = nn.SiLU()):
         super(Encoder, self).__init__()
   
         
         self.encoder = nn.Sequential(
             nn.Conv2d(3, depth, kernel, stride=2, padding=1),
             activation,
+            nn.GroupNorm(1, depth),
+            
             nn.Conv2d(depth, depth*2, kernel, stride=2, padding=1),
             activation,
+            nn.GroupNorm(1, depth*2),
+            
             nn.Conv2d(depth*2, depth*4, kernel, stride=2, padding=1),
             activation,
+            nn.GroupNorm(1, depth*4),
+            
             nn.Conv2d(depth*4, depth*8, kernel, stride=2, padding=1),
-            activation
+            activation,
+            nn.GroupNorm(1, depth*8)
         )
         
         with torch.no_grad():
@@ -45,7 +52,7 @@ class Encoder(nn.Module):
     
 
 class Decoder(nn.Module):
-    def __init__(self, input_shape, embed_dim, depth=32, kernel=4, activation = nn.ELU()):
+    def __init__(self, input_shape, embed_dim, depth=32, kernel=4, activation = nn.SiLU()):
         super(Decoder, self).__init__()
         self.input_shape = input_shape
         C, H, W = self.input_shape
@@ -64,14 +71,22 @@ class Decoder(nn.Module):
         self.decoder = nn.Sequential(
             nn.ConvTranspose2d(depth*8, depth*4, kernel, stride=2, padding=1),
             activation,
+            nn.GroupNorm(1, depth*4),
+            
             nn.ConvTranspose2d(depth*4, depth*2, kernel, stride=2, padding=1),
             activation,
+            nn.GroupNorm(1, depth*2),
+            
             nn.ConvTranspose2d(depth*2, depth, kernel, stride=2, padding=1),
             activation,
+            nn.GroupNorm(1, depth),
+            
             nn.ConvTranspose2d(depth, C, kernel,  stride=2, padding=1),
             
         )
     
+
+        
     def forward(self, x):
         batch_size = x.shape[:2] # [49, 50]
         embed_size = x.shape[-1] # [600]
