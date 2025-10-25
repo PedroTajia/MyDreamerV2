@@ -38,7 +38,7 @@ class Freeze:
     
     def __enter__(self):
         for param in self.get_param(self.modules):
-            param.requires_grad = True
+            param.requires_grad = False
             
     def __exit__(self, type_, val_, tb_):
         for i, param in enumerate(self.get_param(self.modules)):
@@ -80,10 +80,10 @@ class Train():
         kl_ptr = torch.mean(distributions.kl_divergence(self._get_dist(self._rssm_detach(posterior)), prior_dist))
         kl_rtp = torch.mean(distributions.kl_divergence(posterior_dist, self._get_dist(self._rssm_detach(prior))))
         
-        kl_ptr = torch.max(kl_ptr,kl_ptr.new_full(kl_ptr.size(), 1))
-        kl_rtp = torch.max(kl_rtp,kl_rtp.new_full(kl_rtp.size(), 1))
         
-        kl_loss = alpha*kl_ptr + (1-alpha)*kl_rtp
+        rep_loss = torch.clip(kl_ptr, min=1)
+        dyn_loss = torch.clip(kl_rtp, min=1)
+        kl_loss = alpha*rep_loss + (1-alpha)*dyn_loss
         
         return prior_dist, posterior_dist, kl_loss
     
@@ -179,7 +179,7 @@ class Train():
         self.modelstate = self.stoch_size + self.deter_size
         self.decoder = Decoder(obs_shape, self.modelstate, self.info["depth"], self.info["kernel"]).to(self.device)
 
-        
+        self.ret_norm = RetNorm()
         
         
         
@@ -193,9 +193,20 @@ class Train():
     
     def actor_loss(self, imag_reward, imag_value, discount_, imag_log_prob, policy_entropy):
         lambda_returns = self.get_return(imag_reward[:-1], imag_value[:-1], discount_[:-1], boostrap=imag_value[-1], lambda_= self.info['lambda'])
-        # reinforce = (lambda_returns - imag_value[:-1]).detach() * imag_log_prob[1:].unsqueeze(-1)
+        # self.ret_norm.update(lambda_returns)
+        
+        # offset, scale = self.ret_norm.get_stats()
+        # returns = ((lambda_returns - offset) / scale).detach()
+        # base = (imag_value[:-1] - offset) / scale
+        
+        # lambda_returns = returns - base
+        # reinforce = (((lambda_returns - offset) - imag_value[:-1]).detach() / scale) * imag_log_prob[1:].unsqueeze(-1)
         dynamics = lambda_returns
-        discount = torch.cumprod(torch.cat([torch.ones_like(discount_[:1]), discount_[1:-1]]), 0)
+        
+        
+        discount = torch.cumprod(torch.cat([torch.ones_like(discount_[:1]), discount_[1:-1]], 0), 0).detach()
+        
+        
         policy_entropy = policy_entropy[1:].unsqueeze(-1)
     
         actor_loss = -torch.sum(torch.mean(discount * (dynamics + policy_entropy*self.info['policy_entropy_scale']),dim=1))
@@ -207,9 +218,11 @@ class Train():
             state[1][:seq_len].flatten(0, 1),
             state[2][:seq_len].flatten(0, 1)
         )
+        
+        
     def actorcritic_loss(self, post):
-        with torch.no_grad():
-            batch_posterior = self._rssm_detach(self._rssm_seq_batch(post, self.info['seq_len']-1))
+        batch_posterior = self._rssm_detach(self._rssm_seq_batch(post, self.info['seq_len']-1))
+            
         with Freeze(self.world_list):
             imag_state, imag_log_prob, p_entropy = self.rssm.rollout_imag(self.info['horizon'], self.actorModel, batch_posterior)
         imag_modelstate = self.rssm.get_state(imag_state)
@@ -253,3 +266,26 @@ class Train():
         
         
         
+class RetNorm:
+    def __init__(self, decay=0.99, device='mps'):
+        self.device = device
+        self.decay = decay
+        self.ema_q = None  # EMA of (P95 - P5)
+
+    @torch.no_grad()
+    def update(self, returns):  # returns: [T,B] or [N]
+        r = returns.detach().float().reshape(-1)
+        
+        r_quantile = torch.quantile(input=r, q=torch.tensor([0.05, 0.95], device=self.device))
+        
+        if self.ema_q is None:
+            # initialize EMA with first observation
+            self.ema_q = r_quantile.clone()
+        else:
+            self.ema_q = self.decay * self.ema_q + (1 - self.decay) * r_quantile
+    @torch.no_grad()
+    def get_stats(self):
+        offset = self.ema_q[0]
+        scale = torch.clamp(self.ema_q[1] - self.ema_q[0], min=1.0)
+        return offset, scale
+    

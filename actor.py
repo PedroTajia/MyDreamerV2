@@ -30,13 +30,15 @@ class ActorModel(nn.Module):
         self.eval_noise = info['eval_noise']
         self.expl_min = info['expl_min']
         self.expl_decay = info['expl_decay']
-        # self.expl_type = info['expl_type']
+        self.expl_type = info['expl_type']
         self.type_dist = type_dist
         self.device = device
         self.model = self.model_make().to(device)
         
+
     def model_make(self):
         model = [nn.Linear(self.deter_size + self.stoch_size, self.node_size)]
+
         model += [self.activation]
         for _ in range(self.layers):
             model += [nn.Linear(self.node_size, self.node_size)]
@@ -45,14 +47,23 @@ class ActorModel(nn.Module):
         self.logstd_head = nn.Linear(self.node_size, self.action_dim)
         return nn.Sequential(*model)
     
-    def get_dist(self, state, std=1.0, min_std=0.1):
+    def get_dist(self, state, std=1.0, min_std=0.1, std_bias=1e-3):
         logits = self.model(state)
+        if not torch.isfinite(logits).all():
+            logits = torch.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=0.0)
+
+        
         if self.type_dist == 'one_hot':
             return OneHotCategorical(logits=logits)
         else:
+            
             mean = torch.tanh(self.mean_head(logits))
-
-            std = nn.functional.softplus(self.logstd_head(logits)) + min_std
+            # mean = torch.nan_to_num(mean, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            logstd = self.logstd_head(logits)
+            # logstd = torch.nan_to_num(logstd, nan=0.0, posinf=2.0, neginf=-5.0)
+            
+            std = nn.functional.softplus(logstd) + min_std
      
             dist = Normal(mean, std)
             dist = TransformedDistribution(dist, TanhTransform(cache_size=1))
@@ -62,4 +73,5 @@ class ActorModel(nn.Module):
     def forward(self, state):
         action_dist = self.get_dist(state)
         action = action_dist.rsample()
+        # action = torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
         return action, action_dist
