@@ -14,8 +14,8 @@ Tested with Python 3.10+ and PyTorch. If you’re on macOS (MPS) or CUDA, instal
 
 
 # 1) Install core deps
-```pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-pip install gymnasium pygame imageio tqdm numpy matplotlib pillow```
+`pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu`
+`pip install gymnasium pygame imageio tqdm numpy matplotlib pillow`
 
 # 2) RoboSuite (for pixel control tasks)
 `pip install robosuite==1.4.1`
