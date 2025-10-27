@@ -39,7 +39,11 @@ Replay: capacity, sampling, episodic slicing. (See buffer.py.)
 If you use Weights & Biases:
 `export WANDB_PROJECT=mydreamerv2`
 python run.py
-🧱 Repository Structure
+
+
+## 📁 Repository Structure
+
+```text
 MyDreamerV2/
 ├─ run.py            # Entry point for training/eval loops
 ├─ train.py          # World model + actor/value training steps
@@ -50,17 +54,16 @@ MyDreamerV2/
 ├─ actor.py          # Policy (actor) + action distribution
 ├─ buffer.py         # Replay buffer / episodic sampling
 
-GitHub
-🧠 Method (DreamerV2, in short)
+## 🧠 Method (DreamerV2, in short)
 DreamerV2 learns a discrete/structured latent world model (stochastic + deterministic states), optimizes reconstruction/reward/continuation losses with a KL regularizer, and then trains an actor–critic purely from imagined trajectories rolled out in latent space. This decouples representation learning from control while remaining sample-efficient. 
 
-⚙️ Configuration Tips
+## ⚙️ Configuration Tips
 Image size & channels: Keep encoder/decoder resolutions consistent across env.py and image_codec.py.
 Sequence length: Long enough for credit assignment through imagination (e.g., 50–80), but balanced against memory.
 KL balancing: If reconstructions look good but imagination is unstable, tune KL scale or free nats.
 Action distribution: For continuous control, a squashed Gaussian (TanhNormal) is typical; ensure bounds match the env.
 
-📊 Logging & Visualization
+## 📊 Logging & Visualization
 Metrics (losses, returns, KL, reconstruction MSE) and media (episode videos) can be logged to W&B.
 For videos, stack frames as np.uint8 [T, H, W, 3] and log every N steps to avoid I/O slowdown.
 
