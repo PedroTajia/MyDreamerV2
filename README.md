@@ -53,6 +53,7 @@ MyDreamerV2/
 ├─ networks.py       # Reward, Value, Discount heads
 ├─ actor.py          # Policy (actor) + action distribution
 ├─ buffer.py         # Replay buffer / episodic sampling
+```
 
 ## 🧠 Method (DreamerV2, in short)
 DreamerV2 learns a discrete/structured latent world model (stochastic + deterministic states), optimizes reconstruction/reward/continuation losses with a KL regularizer, and then trains an actor–critic purely from imagined trajectories rolled out in latent space. This decouples representation learning from control while remaining sample-efficient. 
