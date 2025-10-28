@@ -25,8 +25,7 @@ Tested with Python 3.10+ and PyTorch. If you’re on macOS (MPS) or CUDA, instal
 DreamerV2 background: paper and project page for conceptual details. 
 
 🚀 Quick Start
-The repository ships with a simple training script and minimal components. A default run (with the included environment wrapper) looks like:
-python run.py
+The repository ships with a simple training script and minimal components. 
 
 Environment: task name, robot arm, reward shaping, frame size. (See env.py.) 
 
@@ -56,15 +55,9 @@ MyDreamerV2/
 ```
 
 ## 🧠 Method (DreamerV2, in short)
-DreamerV2 learns a discrete/structured latent world model (stochastic + deterministic states), optimizes reconstruction/reward/continuation losses with a KL regularizer, and then trains an actor–critic purely from imagined trajectories rolled out in latent space. This decouples representation learning from control while remaining sample-efficient. 
-
-## ⚙️ Configuration Tips
-Image size & channels: Keep encoder/decoder resolutions consistent across env.py and image_codec.py.
-Sequence length: Long enough for credit assignment through imagination (e.g., 50–80), but balanced against memory.
-KL balancing: If reconstructions look good but imagination is unstable, tune KL scale or free nats.
-Action distribution: For continuous control, a squashed Gaussian (TanhNormal) is typical; ensure bounds match the env.
+DreamerV2 learns a discrete/structured latent world model (stochastic + deterministic states), optimizes reconstruction/reward/continuation losses with a KL regularizer, and then trains an actor–critic purely from imagined trajectories rolled out in latent space. 
 
 ## 📊 Logging & Visualization
 Metrics (losses, returns, KL, reconstruction MSE) and media (episode videos) can be logged to W&B.
-For videos, stack frames as np.uint8 [T, H, W, 3] and log every N steps to avoid I/O slowdown.
+
 
