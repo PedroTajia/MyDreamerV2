@@ -26,7 +26,14 @@ def log_wandb_video_from_hw3(frames_hw3_list, step, key="media/rollout", fps=20)
 
 #     W&B expects NumPy videos as (T, C, W, H) by default (yes, W then H)
     frames_tchw = np.transpose(frames_thwc, (0, 3, 1, 2))
-    wandb.log({key: wandb.Video(frames_tchw, fps=fps, format="mp4")}, step=step)
+    # wandb.log({key: wandb.Video(frames_tchw, fps=fps, format="mp4")}, step=step)
+    wandb.log(
+    {
+        "global_step": step,
+        key: wandb.Video(frames_tchw, fps=fps, format="mp4"),
+    },
+    commit=False,  # keep same step with other logs; set True if this is the last log for the step
+)
 
 def init_wandb(cfg):
     run = wandb.init(
@@ -104,23 +111,24 @@ seed = 51
 target_update = 100
 
 
+wandb.define_metric("global_step")
+wandb.define_metric("*", step_metric="global_step")
 
 for iter in range(1, train_steps):
-    
+    train.step = iter
     # training last
     if iter>seed  and iter%train_every == 0:
                 total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss = train.train_batch()
     
                 wandb.log({
                         "loss/total": float(total_loss.detach()),
-                        "loss/kl": float(kl_loss.detach()),
                         "loss/reward": float(reward_loss.detach()),
                         "loss/cont": float(cont_loss.detach()),
                         "loss/obs": float(obs_loss.detach()),
                         "loss/actor": float(actor_loss.detach()),
                         "loss/value": float(value_loss.detach()),
                         
-                        }, step=iter)
+                        }, commit=False)
         
     if iter%target_update == 0:
             train.update_target()
@@ -134,7 +142,7 @@ for iter in range(1, train_steps):
         
         
         done_t = torch.as_tensor(done, dtype=torch.bool, device=device).view(1, 1)
-        cont = (~done_t).to(torch.bfloat16)
+        cont = (~done_t).to(torch.float32)
         
         
         _, post_state = rssm.rssm_obs(embed, prev_action, cont , prev_state)
@@ -149,8 +157,8 @@ for iter in range(1, train_steps):
     if done:
 
         train_ep += 1
-        done_ = True
-        buffer.add(obs, action.squeeze(0).cpu(), reward, done_)
+        
+        buffer.add(next_obs, action.squeeze(0).cpu(), reward, done)
         if len(frames) > 0:
             log_wandb_video_from_hw3(frames, step=iter, key="media/rollout", fps=20)
 
@@ -179,15 +187,19 @@ for iter in range(1, train_steps):
         done = False
         continue
     else:
-        done_ = bool(done)
-        buffer.add(obs, action.squeeze(0).cpu(), reward, done_)
+        buffer.add(obs, action.squeeze(0).cpu(), reward, done)
         obs = next_obs
         prev_state = post_state
         prev_action = action
         score += reward
         
-    wandb.log({
-        "train/episode_return": score,
+    # wandb.log({
+    #     "train/episode_return": score,
         
-        }, step=iter)
+    #     }, step=iter)
+    wandb.log({
+    "global_step": iter,
+    "train/episode_return": score,
+    }, commit=True)
+    
 print(np.mean(scores))

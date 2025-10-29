@@ -69,7 +69,7 @@ class Buffer():
 
 
 class EpisodicBuffer():
-    def __init__(self, capacity, obs_shape, action_shape, seq_len, batch_size, device='cpu', dtype=torch.bfloat16):
+    def __init__(self, capacity, obs_shape, action_shape, seq_len, batch_size, device='cpu', dtype=torch.float32):
         self.capacity = int(capacity)
         self.obs_shape = obs_shape
         self.action_shape = action_shape
@@ -81,25 +81,25 @@ class EpisodicBuffer():
 
         self.rb = TensorDictReplayBuffer(storage=LazyTensorStorage(max_size=self.capacity),sampler=SliceSampler(
                        slice_len=self.slice_len, 
-                       end_key=("next", "done"),
+                       end_key=("done"),
                        strict_length=True))
         
     @torch.no_grad()
     def add(self, obs, action, reward, done):
-        obs_t = obs.detach().to(self.dtype).reshape(*self.obs_shape)
+        obs_t = obs.detach().to(self.dtype).reshape(*self.obs_shape).contiguous().clone()
         
-        act_t = action.detach().to(self.dtype).reshape(self.action_shape)
+        act_t = action.detach().to(self.dtype).reshape(self.action_shape).contiguous().clone()
         
         rew_t = torch.tensor([float(reward)], dtype=self.dtype)
         done_t = torch.tensor([done], dtype=torch.bool)
-        
+      
         td = TensorDict(
             {
                 "obs":obs_t.unsqueeze(0),
                 "action":act_t.unsqueeze(0),
                 "reward":rew_t,
                 "done":done_t,
-                ("next", "done"): done_t.clone()
+                # ("next", "done"): done_t.clone()
                 
             },
             batch_size=[1],
@@ -117,7 +117,9 @@ class EpisodicBuffer():
         obs = td.get("obs")
         actions = td.get("action")
         rewards = td.get("reward")
-        done = td.get(("next", "done"))
+        # done = td.get(("next", "done"))
+        done = td.get("done")
+
         if done.ndim > 2:
         # If last dim is 1, squeeze it; if it's B*L (buggy), take the first channel
             done = done.squeeze(-1) if done.shape[-1] == 1 else done[..., 0]

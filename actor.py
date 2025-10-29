@@ -55,13 +55,13 @@ class ActorModel(nn.Module):
         
         if self.type_dist == 'one_hot':
             return OneHotCategorical(logits=logits)
-        else:
+        elif self.type_dist == 'normal':
             
             mean = torch.tanh(self.mean_head(logits))
-            # mean = torch.nan_to_num(mean, nan=0.0, posinf=0.0, neginf=0.0)
+            mean = torch.nan_to_num(mean, nan=0.0, posinf=0.0, neginf=0.0)
             
             logstd = self.logstd_head(logits)
-            # logstd = torch.nan_to_num(logstd, nan=0.0, posinf=2.0, neginf=-5.0)
+            logstd = torch.nan_to_num(logstd, nan=0.0, posinf=2.0, neginf=-5.0)
             
             std = nn.functional.softplus(logstd) + min_std
      
@@ -73,5 +73,5 @@ class ActorModel(nn.Module):
     def forward(self, state):
         action_dist = self.get_dist(state)
         action = action_dist.rsample()
-        # action = torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
+        action = torch.nan_to_num(action, nan=0.0, posinf=0.0, neginf=0.0)
         return action, action_dist

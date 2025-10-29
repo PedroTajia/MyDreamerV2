@@ -5,6 +5,7 @@ from torch import nn
 import numpy as np
 import imageio
 import torch
+import wandb
 
 import importlib, image_codec, actor, buffer, rssm, networks
 
@@ -46,7 +47,7 @@ class Freeze:
         
 
 
-class Train():
+class Train(nn.Module):
     def __init__(self, info, device='mps'):
         super().__init__()
         self.info = info
@@ -56,6 +57,7 @@ class Train():
         self.device = device
         self._model_init()
         self._optim_initialize()
+        self.step = 0 
     def obs_loss(self, dist, obs):
         return -torch.mean(dist.log_prob(obs))
     def reward_loss(self, dist, reward):
@@ -85,6 +87,11 @@ class Train():
         dyn_loss = torch.clip(kl_rtp, min=1)
         kl_loss = alpha*rep_loss + (1-alpha)*dyn_loss
         
+        wandb.log({
+            "kl/ptr": float(kl_ptr.detach()),
+            "kl/rtp": float(kl_rtp.detach()),
+            "loss/kl_total": float(kl_loss.detach()),
+        }, step=self.step)
         return prior_dist, posterior_dist, kl_loss
     
     
@@ -132,6 +139,9 @@ class Train():
         
         self.actor_optim.step()
         self.value_optim.step()
+        
+       
+        
         return (total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss)
         
     def value_loss(self, imag_modelstate, discount, lambda_return):
@@ -141,7 +151,7 @@ class Train():
             value_target = lambda_return.detach()
             
         value_dist = self.valueModel(value_modelstate)
-        
+       
         return -torch.mean(value_discount * value_dist.log_prob(value_target).unsqueeze(-1))
     def _model_init(self):
         self.class_size = self.info['class_size']
@@ -191,25 +201,36 @@ class Train():
             
         return model_params
     
-    def actor_loss(self, imag_reward, imag_value, discount_, imag_log_prob, policy_entropy):
+    def actor_loss(self, imag_reward, imag_value, discount_, imag_log_prob, policy_entropy, gradient="dynamics"):
         lambda_returns = self.get_return(imag_reward[:-1], imag_value[:-1], discount_[:-1], boostrap=imag_value[-1], lambda_= self.info['lambda'])
-        # self.ret_norm.update(lambda_returns)
+        self.register_buffer("ema_q", torch.zeros(2, device=self.device))
+
+        offset, scale = self.ret_norm.update(lambda_returns, self.ema_q)
         
-        # offset, scale = self.ret_norm.get_stats()
-        # returns = ((lambda_returns - offset) / scale).detach()
-        # base = (imag_value[:-1] - offset) / scale
+        returns = ((lambda_returns - offset) / scale)
+        base = (imag_value[:-1] - offset) / scale
         
-        # lambda_returns = returns - base
-        # reinforce = (((lambda_returns - offset) - imag_value[:-1]).detach() / scale) * imag_log_prob[1:].unsqueeze(-1)
-        dynamics = lambda_returns
+        lambda_returns = returns - base
+        if gradient == "dynamics":
+            target = lambda_returns
+        elif gradient == "reinforce":
+            target = (((lambda_returns - offset) - imag_value[:-1]).detach() / scale) * imag_log_prob[1:].unsqueeze(-1)
+       
         
         
-        discount = torch.cumprod(torch.cat([torch.ones_like(discount_[:1]), discount_[1:-1]], 0), 0).detach()
+        discount = torch.cumprod(torch.cat([torch.ones_like(discount_[:1]), discount_[1:-1]], 0), 0 ).detach()
         
         
         policy_entropy = policy_entropy[1:].unsqueeze(-1)
     
-        actor_loss = -torch.sum(torch.mean(discount * (dynamics + policy_entropy*self.info['policy_entropy_scale']),dim=1))
+        # actor_loss = -torch.sum(torch.mean(discount * (reinforce + policy_entropy*self.info['policy_entropy_scale']),dim=1))
+        actor_loss = -torch.sum(torch.mean(discount * (target + policy_entropy*self.info['policy_entropy_scale']),dim=1))
+
+        wandb.log({
+            "actor/entropy": float(policy_entropy.mean().detach()),
+            "actor/adv_mean": float(lambda_returns.mean().detach()),
+            "actor/adv_std":  float(lambda_returns.std().detach()),
+        }, step=self.step)
         
         return actor_loss, discount, lambda_returns
     def _rssm_seq_batch(self, state, seq_len):
@@ -267,25 +288,22 @@ class Train():
         
         
 class RetNorm:
-    def __init__(self, decay=0.99, device='mps'):
+    def __init__(self, decay=1e-2, device='mps'):
         self.device = device
         self.decay = decay
-        self.ema_q = None  # EMA of (P95 - P5)
+         # EMA of (P95 - P5)
 
     @torch.no_grad()
-    def update(self, returns):  # returns: [T,B] or [N]
+    def update(self, returns, ema_q):  # returns: [T,B] or [N]
         r = returns.detach().float().reshape(-1)
         
         r_quantile = torch.quantile(input=r, q=torch.tensor([0.05, 0.95], device=self.device))
         
-        if self.ema_q is None:
-            # initialize EMA with first observation
-            self.ema_q = r_quantile.clone()
-        else:
-            self.ema_q = self.decay * self.ema_q + (1 - self.decay) * r_quantile
-    @torch.no_grad()
-    def get_stats(self):
-        offset = self.ema_q[0]
-        scale = torch.clamp(self.ema_q[1] - self.ema_q[0], min=1.0)
+        ema_q = self.decay * r_quantile + (1 - self.decay) * ema_q
+            
+        offset = ema_q[0]
+        scale = torch.clamp(ema_q[1] - ema_q[0], min=1.0)
         return offset, scale
+    
+
     
