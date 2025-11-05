@@ -13,7 +13,7 @@ importlib.reload(image_codec)
 from image_codec import Decoder, Encoder
 
 importlib.reload(actor)
-from actor import ActorModel
+from actor import ActorModel, Plan2Explore
 
 importlib.reload(buffer)
 from buffer import Buffer, EpisodicBuffer
@@ -101,7 +101,7 @@ class Train(nn.Module):
         prior, posterior = self.rssm.rollout_obs(self.info['seq_len'], embedding, action, nonterm, prev_state)
         
         post_state = self.rssm.get_state(posterior)
-        
+
         obs_dist = self.decoder(post_state[:-1])
         reward_dist = self.rewardModel(post_state[:-1])
         cont_dist = self.discountModel(post_state[:-1])
@@ -109,23 +109,35 @@ class Train(nn.Module):
         reward_loss = self.reward_loss(reward_dist, reward[1:].unsqueeze(-1))
         cont_loss = self.cont_loss(cont_dist, nonterm[1:])
         
+        explore_loss = self.plan2explore.loss(post_state[:-1].clone().detach())
+        # intrinsic_reward = self.plan2explore._intrinsic_reward(post_state[:-1])
+        # print(f"intrinsic_reward {intrinsic_reward.shape}, {reward_dist.mean.shape}" )
         prior_dist, post_dist, kl_loss = self.kl_loss(prior, posterior)
         total_loss = self.loss_info['kl_scale'] * kl_loss + reward_loss + obs_loss + self.loss_info['discount_scale'] * cont_loss
         
         perpix_mse = (obs[:-1] - obs_dist.sample()).pow(2).mean().item()
-        return total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, posterior, obs_loss, perpix_mse
+        return total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, posterior, obs_loss, perpix_mse, explore_loss
     
     def train_batch(self):
         obs, actions, rewards, terms = self.buffer.sample()
         nonterms = 1-terms.to(torch.bfloat16)
         
-        total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, posterior, obs_loss, perpix_mse = self.representation_loss(obs, actions, rewards, nonterms)
+        total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, posterior, obs_loss, perpix_mse, explore_loss = self.representation_loss(obs, actions, rewards, nonterms)
+        self.plan2explore_optim.zero_grad(set_to_none=True)
+        explore_loss.backward()
+        nn.utils.clip_grad_norm_(self.plan2explore.parameters(), self.info['grad_clip_norm'])
+        self.plan2explore_optim.step()
+        
+        
+        
         self.model_optim.zero_grad()
         total_loss.backward()
         nn.utils.clip_grad_norm_(self.get_param(self.world_list), self.info['grad_clip_norm'])
+        
+        
         self.model_optim.step() 
         
-        actor_loss, value_loss = self.actorcritic_loss(posterior)
+        actor_loss, value_loss, imag_reward = self.actorcritic_loss(posterior)
         
         self.actor_optim.zero_grad(set_to_none=True)
         self.value_optim.zero_grad(set_to_none=True)
@@ -142,7 +154,7 @@ class Train(nn.Module):
         
        
         
-        return (total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss)
+        return (total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss, explore_loss)
         
     def value_loss(self, imag_modelstate, discount, lambda_return):
         with torch.no_grad():
@@ -188,6 +200,8 @@ class Train(nn.Module):
         
         self.modelstate = self.stoch_size + self.deter_size
         self.decoder = Decoder(obs_shape, self.modelstate, self.info["depth"], self.info["kernel"]).to(self.device)
+
+        self.plan2explore = Plan2Explore(self.modelstate , device=self.device)
 
         self.ret_norm = RetNorm()
         
@@ -240,9 +254,12 @@ class Train(nn.Module):
             state[2][:seq_len].flatten(0, 1)
         )
         
+   
         
+    
     def actorcritic_loss(self, post):
         batch_posterior = self._rssm_detach(self._rssm_seq_batch(post, self.info['seq_len']-1))
+       
             
         with Freeze(self.world_list):
             imag_state, imag_log_prob, p_entropy = self.rssm.rollout_imag(self.info['horizon'], self.actorModel, batch_posterior)
@@ -252,11 +269,15 @@ class Train(nn.Module):
             imag_reward = self.rewardModel(imag_modelstate).mean
             imag_value = self.targetValueModel(imag_modelstate).mean
             discount_ = self.info['discount'] * self.discountModel(imag_modelstate).base_dist.probs
-        
+        with torch.no_grad():
+            intrinsic = self.plan2explore._intrinsic_reward(imag_modelstate) 
+        if self.info["explore_only"] == True :
+            
+            imag_reward = intrinsic
         actor_loss, discount, lambda_return = self.actor_loss(imag_reward, imag_value, discount_, imag_log_prob, p_entropy)    
         value_loss = self.value_loss(imag_modelstate, discount, lambda_return)
         
-        return actor_loss, value_loss
+        return actor_loss, value_loss, imag_reward
     
     def get_return(self, reward, value, discount, boostrap, lambda_):
         next_val = torch.cat([value[1:], boostrap.unsqueeze(0)])
@@ -279,13 +300,16 @@ class Train(nn.Module):
     def _optim_initialize(self):
         self.world_list = [self.encoder, self.rssm, self.rewardModel, self.decoder, self.discountModel]
         
+        
         self.actorcritic = [self.actorModel, self.valueModel]
         
         self.model_optim = optim.Adam(self.get_param(self.world_list), self.info['model_lr'])
+
         self.actor_optim = optim.Adam(self.get_param(self.actorcritic), self.info['actor_lr'])
         self.value_optim = optim.Adam(self.valueModel.parameters(), self.info['value_lr'])
         
-        
+        self.plan2explore_optim = optim.Adam(self.plan2explore.parameters(), self.info['plan2explore_lr'])
+
         
 class RetNorm:
     def __init__(self, decay=1e-2, device='mps'):

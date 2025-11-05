@@ -61,6 +61,19 @@ class RobotSuiteEnv(gym.Env):
                               has_renderer=False,
                               reward_shaping=self.reward_shaping, seed=seed)
         
+    def close(self):
+        # Close the underlying robosuite env if it exists
+        try:
+            if hasattr(self, "env") and self.env is not None:
+                self.env.close()
+        except Exception:
+            pass
+        # Let Gymnasium perform any additional cleanup
+        try:
+            super().close()
+        except Exception:
+            pass
+        
     def render(self):
         return np.flip(self.renderObs)
 

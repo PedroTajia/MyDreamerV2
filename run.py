@@ -1,6 +1,8 @@
 import numpy as np
 import imageio
 import gymnasium as gym
+import wandb
+import multiprocessing as mp
 import time
 import torch
 import os
@@ -11,8 +13,11 @@ from tqdm import tqdm
 
 
 
-import wandb
-
+# (Optional but recommended on macOS)
+if mp.get_start_method(allow_none=True) != "spawn":
+    mp.set_start_method("spawn", force=True)
+    
+    
 def log_wandb_video_from_hw3(frames_hw3_list, step, key="media/rollout", fps=20):
     """
     frames_hw3_list: list of np.uint8 frames shaped (H, W, 3) in RGB
@@ -72,12 +77,14 @@ info = {'deter_size':400,
         'model_lr':2e-4,
         'actor_lr':4e-5,
         'value_lr':1e-4,
+        'plan2explore_lr':3e-4,
         'lambda':0.95,
         'policy_entropy_scale':float(3e-3),
         'horizon':15,
         'discount':0.995,
         'grad_clip_norm':100,
         'target_const':1,
+        'explore_only': True,
         'exp_info':{'train_noise':0.3, 'eval_noise':0.0, 'expl_min':0.1, 'expl_decay':200000.0, 'expl_type':'epsilon_greedy'}}
 
 wandb_run = init_wandb(info)
@@ -105,101 +112,129 @@ actor = train.actorModel
 
 train_ep = 0
 obs, score = env.reset(), 0
-train_steps = int(5e6)
+train_steps = int(10000)
 train_every = 10
 seed = 51
 target_update = 100
-
+explore_iter = int(300000)
 
 wandb.define_metric("global_step")
 wandb.define_metric("*", step_metric="global_step")
-
-for iter in range(1, train_steps):
-    train.step = iter
-    # training last
-    if iter>seed  and iter%train_every == 0:
-                total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss = train.train_batch()
-    
+try:
+    for iter in range(1, train_steps+explore_iter):
+        train.step = iter
+        # training last
+        
+        
+        if iter>seed and iter%train_every == 0 and explore_iter<iter:
+                train.info['explore_only'] = False
+                total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss, explore_loss = train.train_batch()
+        
                 wandb.log({
-                        "loss/total": float(total_loss.detach()),
-                        "loss/reward": float(reward_loss.detach()),
-                        "loss/cont": float(cont_loss.detach()),
-                        "loss/obs": float(obs_loss.detach()),
-                        "loss/actor": float(actor_loss.detach()),
-                        "loss/value": float(value_loss.detach()),
-                        
-                        }, commit=False)
-        
-    if iter%target_update == 0:
-            train.update_target()
-        
-
-        
+                            "loss/total": float(total_loss.detach()),
+                            "loss/reward": float(reward_loss.detach()),
+                            "loss/cont": float(cont_loss.detach()),
+                            "loss/obs": float(obs_loss.detach()),
+                            "loss/actor": float(actor_loss.detach()),
+                            "loss/value": float(value_loss.detach()),
+                            }, commit=False)
+        elif iter > seed and explore_iter>iter and iter%train_every == 0:
+            total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss, explore_loss = train.train_batch()
+            wandb.log({"loss/total": float(total_loss.detach()),
+                            "loss/reward": float(reward_loss.detach()),
+                            "loss/cont": float(cont_loss.detach()),
+                            "loss/obs": float(obs_loss.detach()),
+                            "loss/actor": float(actor_loss.detach()),
+                            "loss/value": float(value_loss.detach()),
+                            "loss/explore_loss": float(explore_loss.detach())
+                            }, commit=False)
             
-    with torch.no_grad():
-        obs = obs.to(device, dtype=torch.float32) 
-        embed = encoder(obs).unsqueeze(0).to(device)
-        
-        
-        done_t = torch.as_tensor(done, dtype=torch.bool, device=device).view(1, 1)
-        cont = (~done_t).to(torch.float32)
-        
-        
-        _, post_state = rssm.rssm_obs(embed, prev_action, cont , prev_state)
-        model_state = rssm.get_state(post_state).to(device)
-        action, action_dist = actor(model_state)
-        action = action.detach()
-        scores.append(score)
-        frames.append(env.render())
-    
-    next_obs, reward, done, _ = env.step(action.squeeze(0).cpu().numpy())
-    
-    if done:
+            
+        if iter%target_update == 0:
+                train.update_target()
+            
 
-        train_ep += 1
-        
-        buffer.add(next_obs, action.squeeze(0).cpu(), reward, done)
-        if len(frames) > 0:
-            log_wandb_video_from_hw3(frames, step=iter, key="media/rollout", fps=20)
-
-        frames = []
-        
-        
-        with torch.no_grad():
-                rssm.eval(); train.decoder.eval()
-                imag_state, imag_log_probs, _= rssm.rollout_imag(info['horizon'] , actor, prev_state)
+            
                 
-                imag_modelstate = train.rssm.get_state(imag_state)
-                obs_dist = train.decoder(imag_modelstate)
-                obs_mean = getattr(obs_dist, "mean")  # [T, B, C, H, W]
-                obs_mean = obs_mean + 0.5
+        with torch.no_grad():
+            obs = obs.to(device, dtype=torch.float32) 
+            embed = encoder(obs).unsqueeze(0).to(device)
+            
+            
+            done_t = torch.as_tensor(done, dtype=torch.bool, device=device).view(1, 1)
+            cont = (~done_t).to(torch.float32)
+            
+            
+            _, post_state = rssm.rssm_obs(embed, prev_action, cont , prev_state)
+            model_state = rssm.get_state(post_state).to(device)
+            action, action_dist = actor(model_state)
+            action = action.detach()
+            scores.append(score)
+            frames.append(env.render())
+        
+        next_obs, reward, done, _ = env.step(action.squeeze(0).cpu().numpy())
+        
+        if done:
 
-                for t in range(len(obs_mean)):
-                        frame = (obs_mean[t, 0].clamp(0, 1) * 255).to(torch.uint8)
-                        frame = frame.permute(1, 2, 0).cpu().numpy() 
-                        frame_rssm.append(frame)
-                log_wandb_video_from_hw3(frame_rssm, step=iter, key="media/rollout_rssm", fps=20)
-        frame_rssm = []
-        
-        obs, score = env.reset(), 0
-        prev_state = rssm._init_rssm(1)
-        prev_action = torch.tensor(env.action_space.sample()).unsqueeze(0).to(device=device)
-        done = False
-        continue
-    else:
-        buffer.add(obs, action.squeeze(0).cpu(), reward, done)
-        obs = next_obs
-        prev_state = post_state
-        prev_action = action
-        score += reward
-        
-    # wandb.log({
-    #     "train/episode_return": score,
-        
-    #     }, step=iter)
-    wandb.log({
-    "global_step": iter,
-    "train/episode_return": score,
-    }, commit=True)
+            train_ep += 1
+            
+            buffer.add(next_obs, action.squeeze(0).cpu(), reward, done)
+            if len(frames) > 0:
+                log_wandb_video_from_hw3(frames, step=iter, key="media/rollout", fps=20)
+
+            frames = []
+            
+            
+            with torch.no_grad():
+                    rssm.eval(); train.decoder.eval()
+                    imag_state, imag_log_probs, _= rssm.rollout_imag(info['horizon'] , actor, prev_state)
+                    
+                    imag_modelstate = train.rssm.get_state(imag_state)
+                    obs_dist = train.decoder(imag_modelstate)
+                    obs_mean = getattr(obs_dist, "mean")  # [T, B, C, H, W]
+                    obs_mean = obs_mean + 0.5
+
+                    for t in range(len(obs_mean)):
+                            frame = (obs_mean[t, 0].clamp(0, 1) * 255).to(torch.uint8)
+                            frame = frame.permute(1, 2, 0).cpu().numpy() 
+                            frame_rssm.append(frame)
+                    intrinsic_reward = train.plan2explore._intrinsic_reward(imag_modelstate)
+                    wandb.log({
+                    "global_step": iter,
+                    "train/intrinsic_reward": intrinsic_reward.mean(),
+                    }, commit=True)
+                    log_wandb_video_from_hw3(frame_rssm, step=iter, key="media/rollout_rssm", fps=20)
+            frame_rssm = []
+            
+            obs, score = env.reset(), 0
+            prev_state = rssm._init_rssm(1)
+            prev_action = torch.tensor(env.action_space.sample()).unsqueeze(0).to(device=device)
+            done = False
+            continue
+        else:
+            buffer.add(obs, action.squeeze(0).cpu(), reward, done)
+            obs = next_obs
+            prev_state = post_state
+            prev_action = action
+            score += reward
+            
+        # wandb.log({
+        #     "train/episode_return": score,
+            
+        #     }, step=iter)
+        wandb.log({
+        "global_step": iter,
+        "train/episode_return": score,
+        }, commit=True)
+finally:
+        # Make shutdown orderly so no semaphores remain registered
+        try:
+            env.close()
+        except Exception:
+            pass
+        try:
+            wandb.finish()  # <—— THIS IS THE BIG ONE
+        except Exception:
+            pass
     
 print(np.mean(scores))
