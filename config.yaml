@@ -1,0 +1,62 @@
+# --- Model / RSSM ---
+deter_size: 400
+class_size: 32
+category_size: 32
+obs_shape: [3, 64, 64]     # lists parse better than Python tuples in YAML
+action_size: 7
+embedding_size: 400
+rssm_node_size: 600
+
+# --- Replay / Training ---
+capacity: 100000           # instead of int(1e5)
+seq_len: 50
+batch_size: 32
+actor_layer: 4
+node_size_actor: 400
+reward_node_size: 400
+value_node_size: 400
+discount_node_size: 400
+steps: 500000
+target_update: 100
+train_every: 20
+seed: 51
+
+# --- Encoder/Decoder (example conv params you mentioned) ---
+depth: 32
+kernel: 4
+
+# --- Loss / KL / Opt ---
+kl_info: { alpha: 0.8 }
+loss_info: { discount_scale: 1.0, kl_scale: 1.0 }
+model_lr: 0.0002
+actor_lr: 0.00004
+value_lr: 0.0001
+plan2explore_lr: 0.0003
+
+# --- RL ---
+lambda: 0.95
+policy_entropy_scale: 0.003  # instead of float(3e-3)
+horizon: 15
+discount: 0.995
+grad_clip_norm: 100.0
+target_const: 1.0
+explore_only: True          # fixed stray quote
+
+exp_info:
+  train_noise: 0.3
+  eval_noise: 0.0
+  expl_min: 0.1
+  expl_decay: 200000.0
+  expl_type: epsilon_greedy
+
+# --- Device / Dtype (new, optional) ---
+device: auto                 # choices: auto | cuda | mps | cpu | cuda:0
+dtype: float32               # choices: float32 | float16 | bfloat16
+
+# logging
+wandb_project: mydreamerv2
+wandb_silent: false
+enable_wandb: true
+wandb_entity: amavizcapedro
+save_csv: true
+save_video: true

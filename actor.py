@@ -77,35 +77,34 @@ class ActorModel(nn.Module):
         return action, action_dist
     
 class MLP(nn.Module):
-    def __init__(self, in_dim, out_dim, hidden=512):
+    def __init__(self, in_dim, out_dim, hidden=512, fixed_std=1.0, layers_num=3):
         super().__init__()
+        self.fixed_std = fixed_std
         self.out_dim = out_dim
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, hidden), 
+        net = []
+        for _ in range(layers_num):
+            net += [nn.Linear(in_dim, hidden), 
             nn.SiLU(), 
-            nn.RMSNorm(hidden),
-            
-            nn.Linear(hidden, hidden), 
-            nn.SiLU(), 
-            nn.RMSNorm(hidden),
-            
-        )
-        self.head = nn.Linear(hidden, 2 * self.out_dim)
+            nn.RMSNorm(hidden)]
+            in_dim = hidden
+        self.net = nn.Sequential(*net)
+        
+        self.head = nn.Linear(hidden, self.out_dim)
     def forward(self, x): 
         h = self.net(x)
-        params = self.head(h)                           # [N, 2*out_dim]
-        mean, log_std = params.split(self.out_dim, dim=-1)
-        # clamp for stability; exp is simple and works well here
-        log_std = log_std.clamp(-5.0, 2.0)
-        std = log_std.exp() + 1e-6
+        mean = self.head(h)                           # [N, 2*out_dim]
+        # mean, log_std = params.split(self.out_dim, dim=-1)
+        # # clamp for stability; exp is simple and works well here
+        # log_std = log_std.clamp(-5.0, 2.0)
+        # std = log_std.exp() + 1e-6
         
-        return Independent(Normal(mean, std), 1)
+        return Independent(Normal(mean, self.fixed_std), 1)
     
 class Plan2Explore(nn.Module):
-    def __init__(self, state_size, k=5, hidden=512, fixed_std=1.0, device="mps"):
+    def __init__(self, state_size, k=5, hidden=1024, fixed_std=1.0, device="mps"):
         super().__init__()
         self.state_size = state_size
-        self.heads = nn.ModuleList([MLP(self.state_size, self.state_size, hidden) for _ in range(k)])
+        self.heads = nn.ModuleList([MLP(self.state_size, self.state_size, hidden, fixed_std) for _ in range(k)])
 
         self.to(device)     
     def _intrinsic_reward(self, state):

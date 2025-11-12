@@ -1,240 +1,179 @@
-import numpy as np
-import imageio
-import gymnasium as gym
 import wandb
-import multiprocessing as mp
-import time
 import torch
-import os
-from collections import deque
 from env import RobotSuiteEnv
+from common import load_yaml_dict, DotDict
 from train import Train
-from tqdm import tqdm
+from pathlib import Path
+from datetime import datetime
+from logger import Logger
 
 
 
-# (Optional but recommended on macOS)
-if mp.get_start_method(allow_none=True) != "spawn":
-    mp.set_start_method("spawn", force=True)
-    
-    
-def log_wandb_video_from_hw3(frames_hw3_list, step, key="media/rollout", fps=20):
-    """
-    frames_hw3_list: list of np.uint8 frames shaped (H, W, 3) in RGB
-    Logs directly to W&B without saving any file locally.
-    """
-    if not frames_hw3_list:
-        return
-    # Stack -> THWC
-    frames_thwc = np.stack(frames_hw3_list, axis=0).astype(np.uint8)           # [T, H, W, 3]
-    
-
-#     W&B expects NumPy videos as (T, C, W, H) by default (yes, W then H)
-    frames_tchw = np.transpose(frames_thwc, (0, 3, 1, 2))
-    # wandb.log({key: wandb.Video(frames_tchw, fps=fps, format="mp4")}, step=step)
-    wandb.log(
-    {
-        "global_step": step,
-        key: wandb.Video(frames_tchw, fps=fps, format="mp4"),
-    },
-    commit=False,  # keep same step with other logs; set True if this is the last log for the step
-)
-
-def init_wandb(cfg):
-    run = wandb.init(
-        project=os.getenv("WANDB_PROJECT", "mydreamerv2"),
-        entity=os.getenv("WANDB_ENTITY", None),
-        name=cfg.get("run_name", None),
-        config=cfg,                 # your args/hparams dict
-        mode=os.getenv("WANDB_MODE", "online"),  # set WANDB_MODE=offline if needed
-        id=os.getenv("WANDB_RUN_ID"),            # optional: support resume
-        resume=os.getenv("WANDB_RESUME", None),  # e.g., "allow" or "must"
-        save_code=True,            # uploads your code for reproducibility
-    )
-    wandb.run.log_code(".")        # attach current code snapshot
-    return run
-
-
-info = {'deter_size':400,
-        'class_size':32, 
-        'category_size':32,
-        'obs_shape':(3, 64, 64),
-        'action_size':7,
-        'embedding_size':400,
-        'rssm_node_size':600,
-        'capacity':int(1e5),
-        'seq_len':50,
-        'batch_size':32,
-        'actor_layer':4,
-        'node_size_actor':400,
-        'reward_node_size':400,
-        'value_node_size':400,
-        'discount_node_size':400,
-        'depth':32,
-        'kernel':4,
-        'kl_info':{'alpha':0.8},
-        'loss_info':{'discount_scale':1, 'kl_scale':1},
-        'model_lr':2e-4,
-        'actor_lr':4e-5,
-        'value_lr':1e-4,
-        'plan2explore_lr':3e-4,
-        'lambda':0.95,
-        'policy_entropy_scale':float(3e-3),
-        'horizon':15,
-        'discount':0.995,
-        'grad_clip_norm':100,
-        'target_const':1,
-        'explore_only': True,
-        'exp_info':{'train_noise':0.3, 'eval_noise':0.0, 'expl_min':0.1, 'expl_decay':200000.0, 'expl_type':'epsilon_greedy'}}
-
-wandb_run = init_wandb(info)
+# usage
 
 device = "mps" if torch.backends.mps.is_available( ) else "cpu"
+device = "cuda" if torch.cuda.is_available() else device
 print(f"Device: {device}")
 
 
+def main():
+    info = load_yaml_dict("config.yaml") 
+    
+    name = info.get("exp_name") or f"{info.get('task','exp')}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    seed = info.get("seed", 0)
+    info.update({
+        "exp_name": name,
+        "seed": seed,
+        "work_dir": Path("./runs") / name / str(seed),
+        "steps": int(info.get("steps", 0)),
+    })
+    
+    info = DotDict(info)
+    
+    log = Logger(info)
+    
+    train = Train(info, device=device)
+    
+    env = RobotSuiteEnv(env_name='Lift', robot="Panda", output_obs=info['obs_shape'])
 
-train = Train(info)
-env = RobotSuiteEnv(env_name='Lift', robot="Panda", output_obs=info['obs_shape'])
-buffer = train.buffer
-# diferent part
-rssm = train.rssm
+    prev_state = train.rssm._init_rssm(1)
+    prev_action = torch.tensor(env.action_space.sample()).unsqueeze(0).to(device=device)
+    
+    done = False
+    
+    obs, score = env.reset(), 0
 
-prev_state = rssm._init_rssm(1)
-prev_action = torch.tensor(env.action_space.sample()).unsqueeze(0).to(device=device)
-scores = []
-done = False
-encoder = train.encoder
-decoder = train.decoder
-frames = []
-frame_rssm = []
-actor = train.actorModel
+    
+    video = log.video  
+    
+    done_num = 0
+    
+    t_in_ep = 0
 
-train_ep = 0
-obs, score = env.reset(), 0
-train_steps = int(10000)
-train_every = 10
-seed = 51
-target_update = 100
-explore_iter = int(300000)
-
-wandb.define_metric("global_step")
-wandb.define_metric("*", step_metric="global_step")
-try:
-    for iter in range(1, train_steps+explore_iter):
-        train.step = iter
-        # training last
-        
-        
-        if iter>seed and iter%train_every == 0 and explore_iter<iter:
-                train.info['explore_only'] = False
+    
+    try:
+        for iter in range( int(info['steps'])):
+            # training last
+            
+    
+            if iter > info['seed'] and iter%info['train_every'] == 0:
                 total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss, explore_loss = train.train_batch()
-        
-                wandb.log({
-                            "loss/total": float(total_loss.detach()),
-                            "loss/reward": float(reward_loss.detach()),
-                            "loss/cont": float(cont_loss.detach()),
-                            "loss/obs": float(obs_loss.detach()),
-                            "loss/actor": float(actor_loss.detach()),
-                            "loss/value": float(value_loss.detach()),
-                            }, commit=False)
-        elif iter > seed and explore_iter>iter and iter%train_every == 0:
-            total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss, explore_loss = train.train_batch()
-            wandb.log({"loss/total": float(total_loss.detach()),
-                            "loss/reward": float(reward_loss.detach()),
-                            "loss/cont": float(cont_loss.detach()),
-                            "loss/obs": float(obs_loss.detach()),
-                            "loss/actor": float(actor_loss.detach()),
-                            "loss/value": float(value_loss.detach()),
-                            "loss/explore_loss": float(explore_loss.detach())
-                            }, commit=False)
+                metrics = {     
+                                "step": iter,
+                                "total_loss": float(total_loss.detach()),
+                                "reward_loss": float(reward_loss.detach()),
+                                "cont_loss": float(cont_loss.detach()),
+                                "obs_loss": float(obs_loss.detach()),
+                                "actor_loss": float(actor_loss.detach()),
+                                "value_loss": float(value_loss.detach()),
+                                "kl_loss": float(kl_loss.detach()),
+                                "episode_reward": score
+                                }
             
-            
-        if iter%target_update == 0:
-                train.update_target()
-            
-
-            
+                if info["explore_only"]:
+                    metrics["explore_loss"] = explore_loss
                 
-        with torch.no_grad():
-            obs = obs.to(device, dtype=torch.float32) 
-            embed = encoder(obs).unsqueeze(0).to(device)
-            
-            
-            done_t = torch.as_tensor(done, dtype=torch.bool, device=device).view(1, 1)
-            cont = (~done_t).to(torch.float32)
-            
-            
-            _, post_state = rssm.rssm_obs(embed, prev_action, cont , prev_state)
-            model_state = rssm.get_state(post_state).to(device)
-            action, action_dist = actor(model_state)
-            action = action.detach()
-            scores.append(score)
-            frames.append(env.render())
-        
-        next_obs, reward, done, _ = env.step(action.squeeze(0).cpu().numpy())
-        
-        if done:
+                log.log(metrics, category="train")
 
-            train_ep += 1
-            
-            buffer.add(next_obs, action.squeeze(0).cpu(), reward, done)
-            if len(frames) > 0:
-                log_wandb_video_from_hw3(frames, step=iter, key="media/rollout", fps=20)
+            if iter%info['target_update'] == 0:
+                    train.update_target()
+                
 
-            frames = []
-            
-            
+                
             with torch.no_grad():
-                    rssm.eval(); train.decoder.eval()
-                    imag_state, imag_log_probs, _= rssm.rollout_imag(info['horizon'] , actor, prev_state)
-                    
-                    imag_modelstate = train.rssm.get_state(imag_state)
-                    obs_dist = train.decoder(imag_modelstate)
-                    obs_mean = getattr(obs_dist, "mean")  # [T, B, C, H, W]
-                    obs_mean = obs_mean + 0.5
+                obs = obs.to(device, dtype=torch.float32) 
+                embed = train.encoder(obs).unsqueeze(0).to(device)
+                
+                
+                done_t = torch.as_tensor(done, dtype=torch.bool, device=device).view(1, 1)
+                cont = (~done_t).to(torch.float32)
+                
+                
+                _, post_state = train.rssm.rssm_obs(embed, prev_action, cont , prev_state)
+                model_state = train.rssm.get_state(post_state).to(device)
+                action, action_dist = train.actorModel(model_state)
+                action = action.detach()
+                
+                video.add(env.render())
+                if t_in_ep == 0:
+                    rssm_first_post = post_state
 
-                    for t in range(len(obs_mean)):
+            next_obs, reward, done, _ = env.step(action.squeeze(0).cpu().numpy())
+            
+            if done:
+                done_num += 1
+                
+                if done_num%25== 0:
+                    if len(video.frames) > 256:
+                        video.frames = video.frames[-256:]
+                        
+                    video.save(iter, key = "video/rollout")
+                    video.reset()
+                    
+                if done_num%10== 0:    
+                    with torch.no_grad():
+                        video.reset()
+                        train.rssm.eval(); train.decoder.eval()
+                        
+                        start_state = rssm_first_post if rssm_first_post is not None else prev_state
+
+                        imag_state, _, _ = train.rssm.rollout_imag(info['horizon'] , train.actorModel, start_state)
+                                
+                        imag_modelstate = train.rssm.get_state(imag_state)
+                        obs_dist = train.decoder(imag_modelstate)
+                        obs_mean = getattr(obs_dist, "mean")  # [T, B, C, H, W]
+
+                        for t in range(len(obs_mean)):
                             frame = (obs_mean[t, 0].clamp(0, 1) * 255).to(torch.uint8)
                             frame = frame.permute(1, 2, 0).cpu().numpy() 
-                            frame_rssm.append(frame)
-                    intrinsic_reward = train.plan2explore._intrinsic_reward(imag_modelstate)
-                    wandb.log({
-                    "global_step": iter,
-                    "train/intrinsic_reward": intrinsic_reward.mean(),
-                    }, commit=True)
-                    log_wandb_video_from_hw3(frame_rssm, step=iter, key="media/rollout_rssm", fps=20)
-            frame_rssm = []
+                            video.add(frame)
+                        video.save(iter, key = "video/rollout_rssm")
+                        video.reset()            
+                
+                if info["explore_only"]:
+                    intrinsic = train.plan2explore._intrinsic_reward(imag_modelstate) 
+                    log.log({"step": iter, "intrinsic_reward":intrinsic.mean(), }, category="train")
+                    
+                
+                train.buffer.add(next_obs, action.squeeze(0).cpu(), reward, done)
+                obs, score = env.reset(), 0
+                prev_state = train.rssm._init_rssm(1)
+                
+                rssm_first_post = None
+                t_in_ep = 0
+
+
+                prev_action = torch.tensor(env.action_space.sample()).unsqueeze(0).to(device=device)
+                done = False
+                continue
+                            
+                        
+                
+                
+            else:
+                train.buffer.add(obs, action.squeeze(0).cpu(), reward, done)
+                obs = next_obs
+                prev_state = post_state
+                prev_action = action
+                score += reward
+                t_in_ep += 1
+                
             
-            obs, score = env.reset(), 0
-            prev_state = rssm._init_rssm(1)
-            prev_action = torch.tensor(env.action_space.sample()).unsqueeze(0).to(device=device)
-            done = False
-            continue
-        else:
-            buffer.add(obs, action.squeeze(0).cpu(), reward, done)
-            obs = next_obs
-            prev_state = post_state
-            prev_action = action
-            score += reward
             
-        # wandb.log({
-        #     "train/episode_return": score,
             
-        #     }, step=iter)
-        wandb.log({
-        "global_step": iter,
-        "train/episode_return": score,
-        }, commit=True)
-finally:
-        # Make shutdown orderly so no semaphores remain registered
-        try:
-            env.close()
-        except Exception:
-            pass
-        try:
-            wandb.finish()  # <—— THIS IS THE BIG ONE
-        except Exception:
-            pass
+
+                    
+    finally:
+            # Make shutdown orderly so no semaphores remain registered
+            try:
+                env.close()
+            except Exception:
+                pass
+            try:
+                wandb.finish() 
+            except Exception:
+                pass
     
-print(np.mean(scores))
+if __name__ == "__main__":
+  
+    main()

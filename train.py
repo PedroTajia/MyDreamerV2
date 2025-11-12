@@ -3,7 +3,6 @@ from torch import distributions
 from torch import no_grad
 from torch import nn
 import numpy as np
-import imageio
 import torch
 import wandb
 
@@ -87,11 +86,7 @@ class Train(nn.Module):
         dyn_loss = torch.clip(kl_rtp, min=1)
         kl_loss = alpha*rep_loss + (1-alpha)*dyn_loss
         
-        wandb.log({
-            "kl/ptr": float(kl_ptr.detach()),
-            "kl/rtp": float(kl_rtp.detach()),
-            "loss/kl_total": float(kl_loss.detach()),
-        }, step=self.step)
+        
         return prior_dist, posterior_dist, kl_loss
     
     
@@ -123,10 +118,11 @@ class Train(nn.Module):
         nonterms = 1-terms.to(torch.bfloat16)
         
         total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, posterior, obs_loss, perpix_mse, explore_loss = self.representation_loss(obs, actions, rewards, nonterms)
-        self.plan2explore_optim.zero_grad(set_to_none=True)
-        explore_loss.backward()
-        nn.utils.clip_grad_norm_(self.plan2explore.parameters(), self.info['grad_clip_norm'])
-        self.plan2explore_optim.step()
+        if self.info['explore_only']:
+            self.plan2explore_optim.zero_grad(set_to_none=True)
+            explore_loss.backward()
+            nn.utils.clip_grad_norm_(self.plan2explore.parameters(), self.info['grad_clip_norm'])
+            self.plan2explore_optim.step()
         
         
         
@@ -203,7 +199,7 @@ class Train(nn.Module):
 
         self.plan2explore = Plan2Explore(self.modelstate , device=self.device)
 
-        self.ret_norm = RetNorm()
+        self.ret_norm = RetNorm(device=self.device)
         
         
         
@@ -240,11 +236,11 @@ class Train(nn.Module):
         # actor_loss = -torch.sum(torch.mean(discount * (reinforce + policy_entropy*self.info['policy_entropy_scale']),dim=1))
         actor_loss = -torch.sum(torch.mean(discount * (target + policy_entropy*self.info['policy_entropy_scale']),dim=1))
 
-        wandb.log({
-            "actor/entropy": float(policy_entropy.mean().detach()),
-            "actor/adv_mean": float(lambda_returns.mean().detach()),
-            "actor/adv_std":  float(lambda_returns.std().detach()),
-        }, step=self.step)
+        # wandb.log({
+        #     "actor/entropy": float(policy_entropy.mean().detach()),
+        #     "actor/adv_mean": float(lambda_returns.mean().detach()),
+        #     "actor/adv_std":  float(lambda_returns.std().detach()),
+        # }, step=self.step)
         
         return actor_loss, discount, lambda_returns
     def _rssm_seq_batch(self, state, seq_len):
@@ -266,8 +262,8 @@ class Train(nn.Module):
         imag_modelstate = self.rssm.get_state(imag_state)
         
         with Freeze(self.world_list + [self.valueModel, self.targetValueModel, self.discountModel]):
-            imag_reward = self.rewardModel(imag_modelstate).mean
-            imag_value = self.targetValueModel(imag_modelstate).mean
+            imag_reward = self.rewardModel(imag_modelstate).mean()
+            imag_value = self.targetValueModel(imag_modelstate).mean()
             discount_ = self.info['discount'] * self.discountModel(imag_modelstate).base_dist.probs
         with torch.no_grad():
             intrinsic = self.plan2explore._intrinsic_reward(imag_modelstate) 
