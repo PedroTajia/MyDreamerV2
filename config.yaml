@@ -6,7 +6,7 @@ obs_shape: [3, 64, 64]     # lists parse better than Python tuples in YAML
 action_size: 7
 embedding_size: 400
 rssm_node_size: 600
-
+consistency_coef: 2
 # --- Replay / Training ---
 capacity: 100000           # instead of int(1e5)
 seq_len: 50
@@ -20,7 +20,7 @@ steps: 500000
 target_update: 100
 train_every: 20
 seed: 51
-
+encoder_update: 10
 # --- Encoder/Decoder (example conv params you mentioned) ---
 depth: 32
 kernel: 4
@@ -40,7 +40,7 @@ horizon: 15
 discount: 0.995
 grad_clip_norm: 100.0
 target_const: 1.0
-explore_only: True          # fixed stray quote
+explore_only: False          # fixed stray quote
 
 exp_info:
   train_noise: 0.3
@@ -60,3 +60,16 @@ enable_wandb: true
 wandb_entity: amavizcapedro
 save_csv: true
 save_video: true
+
+# planning
+planning: False
+iterations: 3
+num_samples: 96
+num_elites: 16
+mixture_coef: 0.05
+min_std: 0.05
+temperature: 0.5
+momentum: 0.1
+seed_steps: 2000
+
+std_schedule: "linear(1.0, 0.1, 10000)"

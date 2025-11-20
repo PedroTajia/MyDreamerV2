@@ -2,6 +2,8 @@ from torch import optim
 from torch import distributions
 from torch import no_grad
 from torch import nn
+from common import linear_schedule, one_state
+import torch.nn.functional as F
 import numpy as np
 import torch
 import wandb
@@ -15,7 +17,7 @@ importlib.reload(actor)
 from actor import ActorModel, Plan2Explore
 
 importlib.reload(buffer)
-from buffer import Buffer, EpisodicBuffer
+from buffer import EpisodicBuffer
 
 importlib.reload(rssm)
 from rssm import RSSM
@@ -57,6 +59,7 @@ class Train(nn.Module):
         self._model_init()
         self._optim_initialize()
         self.step = 0 
+        self.std = linear_schedule(self.info["std_schedule"], 0)
     def obs_loss(self, dist, obs):
         return -torch.mean(dist.log_prob(obs))
     def reward_loss(self, dist, reward):
@@ -92,32 +95,40 @@ class Train(nn.Module):
     
     def representation_loss(self, obs, action, reward, nonterm):
         embedding = self.encoder(obs)
+    
         prev_state = self.rssm._init_rssm(self.info['batch_size'])
+
         prior, posterior = self.rssm.rollout_obs(self.info['seq_len'], embedding, action, nonterm, prev_state)
         
-        post_state = self.rssm.get_state(posterior)
+        
+        state = self.rssm.get_state(posterior)
+        
+        reward_dist = self.rewardModel(state[:-1])
+        cont_dist = self.discountModel(state[:-1])
+        obs_dist = self.decoder(state[:-1])
 
-        obs_dist = self.decoder(post_state[:-1])
-        reward_dist = self.rewardModel(post_state[:-1])
-        cont_dist = self.discountModel(post_state[:-1])
         obs_loss = self.obs_loss(obs_dist, obs[:-1])
+       
         reward_loss = self.reward_loss(reward_dist, reward[1:].unsqueeze(-1))
         cont_loss = self.cont_loss(cont_dist, nonterm[1:])
         
-        explore_loss = self.plan2explore.loss(post_state[:-1].clone().detach())
-        # intrinsic_reward = self.plan2explore._intrinsic_reward(post_state[:-1])
-        # print(f"intrinsic_reward {intrinsic_reward.shape}, {reward_dist.mean.shape}" )
-        prior_dist, post_dist, kl_loss = self.kl_loss(prior, posterior)
+        _, _, kl_loss = self.kl_loss(prior, posterior)
+        explore_loss = self.plan2explore.loss(state[:-1].clone().detach())
+        
+        
         total_loss = self.loss_info['kl_scale'] * kl_loss + reward_loss + obs_loss + self.loss_info['discount_scale'] * cont_loss
         
-        perpix_mse = (obs[:-1] - obs_dist.sample()).pow(2).mean().item()
-        return total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, posterior, obs_loss, perpix_mse, explore_loss
+        
+        return total_loss, kl_loss, reward_loss, cont_loss, posterior, obs_loss, explore_loss
     
+    def consistency_loss(self, z, next_z):
+        
+        return F.mse_loss(z, next_z.detach())
     def train_batch(self):
         obs, actions, rewards, terms = self.buffer.sample()
-        nonterms = 1-terms.to(torch.bfloat16)
+        nonterms = 1-terms.to(torch.float32)
         
-        total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, posterior, obs_loss, perpix_mse, explore_loss = self.representation_loss(obs, actions, rewards, nonterms)
+        total_loss, kl_loss, reward_loss, cont_loss, posterior, obs_loss, explore_loss = self.representation_loss(obs, actions, rewards, nonterms)
         if self.info['explore_only']:
             self.plan2explore_optim.zero_grad(set_to_none=True)
             explore_loss.backward()
@@ -150,7 +161,7 @@ class Train(nn.Module):
         
        
         
-        return (total_loss, kl_loss, reward_loss, cont_loss, prior_dist, post_dist, obs_loss, perpix_mse, actor_loss, value_loss, explore_loss)
+        return (total_loss, kl_loss, reward_loss, cont_loss, obs_loss, actor_loss, value_loss, explore_loss)
         
     def value_loss(self, imag_modelstate, discount, lambda_return):
         with torch.no_grad():
@@ -191,6 +202,8 @@ class Train(nn.Module):
         
         self.discountModel = DiscountModel(self.stoch_size, self.deter_size, self.info['discount_node_size']).to(self.device)
         self.encoder = Encoder(obs_shape, embedding_size, self.info["depth"], self.info["kernel"]).to(self.device)
+        self.targetencoder = Encoder(obs_shape, embedding_size, self.info["depth"], self.info["kernel"]).to(self.device)
+        self.targetencoder.load_state_dict(self.encoder.state_dict())
         # self.encoder = torch.compile(self.encoder)
 
         
@@ -200,9 +213,73 @@ class Train(nn.Module):
         self.plan2explore = Plan2Explore(self.modelstate , device=self.device)
 
         self.ret_norm = RetNorm(device=self.device)
+    
+    @torch.no_grad()
+    def estimate_value(self, z, actions, horizon, nonterm):
+        """Estimate value of a trajectory starting at latent state z and executing given actions."""
+        G, discount = 0, 1
+        for t in range(horizon):
+            reward = self.plan2explore._intrinsic_reward(self.rssm.get_state(z).detach()) 
+            nonterms_t = torch.ones(actions[t].shape[0], 1, device=self.device)
+
+            z = self.rssm.rssm_image(actions[t], z, nonterms_t)
+            G += discount * reward
+            discount *= self.info["discount"]
+        G += discount * self.targetValueModel(self.rssm.get_state(z).detach()).mean()
+        return G
+    
+    def plan(self, embed, action, nonterm, eval_mode, step, t0, prev_state):		
+        if step < self.info["seed_steps"] and not eval_mode:
+            return (torch.empty(self.info["action_size"], dtype=torch.float32, device=self.device).uniform_(-1, 1).unsqueeze(0))   # <- make it [1, A])
+        
+        horizon = self.info["horizon"]
+        num_pi_trajs = int(self.info["mixture_coef"] * self.info["num_samples"])
+        prior, posterior = self.rssm.rssm_obs(embed, action, nonterm, prev_state)
+        z = tuple(s.repeat(num_pi_trajs, 1) for s in posterior)        
+        if num_pi_trajs > 0:
+            pi_actions = torch.empty(horizon, num_pi_trajs, self.info["action_size"], device=self.device)
+        for t in range(horizon):
+                pi_actions[t] = self.actorModel(self.rssm.get_state(z))[0]
+                nonterms_t = torch.ones(pi_actions[t].shape[0], 1, device=self.device)
+                z = self.rssm.rssm_image(pi_actions[t], z, nonterms_t)
+        prior = self.rssm.rssm_obs(embed, action, nonterm, prev_state)[0]
+        z = tuple(s.repeat(self.info["num_samples"]+num_pi_trajs, 1) for s in prior)        
+        mean = torch.zeros(horizon, self.info["action_size"], device=self.device)
+        std = 2*torch.ones(horizon, self.info["action_size"], device=self.device)
+        
+        if not t0 and hasattr(self, '_prev_mean'):
+            mean[:-1] = self._prev_mean[1:]
         
         
-        
+        for i in range(self.info["iterations"]):
+            actions = torch.clamp(mean.unsqueeze(1) + std.unsqueeze(1) * \
+				torch.randn(horizon, self.info["num_samples"], self.info["action_size"], device=std.device), -1, 1)
+            if num_pi_trajs > 0:
+                actions = torch.cat([actions, pi_actions], dim=1)
+                # Compute elite actions
+            value = self.estimate_value(z, actions, horizon, nonterm).nan_to_num_(0)
+            elite_idxs = torch.topk(value.squeeze(1), self.info["num_elites"], dim=0).indices
+            elite_value, elite_actions = value[elite_idxs], actions[:, elite_idxs]
+
+            # Update parameters
+            max_value = elite_value.max(0)[0]
+            score = torch.exp(self.info["temperature"]*(elite_value - max_value))
+            score /= score.sum(0)
+            _mean = torch.sum(score.unsqueeze(0) * elite_actions, dim=1) / (score.sum(0) + 1e-9)
+            _std = torch.sqrt(torch.sum(score.unsqueeze(0) * (elite_actions - _mean.unsqueeze(1)) ** 2, dim=1) / (score.sum(0) + 1e-9))
+            _std = _std.clamp_(self.std, 2)
+            mean, std = self.info["momentum"] * mean + (1 - self.info["momentum"]) * _mean, _std
+
+        # Outputs
+        score = score.squeeze(1).cpu().numpy()
+        actions = elite_actions[:, np.random.choice(np.arange(score.shape[0]), p=score)]
+        self._prev_mean = mean
+        mean, std = actions[0], _std[0]
+        a = mean
+        if not eval_mode:
+            a += std * torch.randn(self.info["action_size"], device=std.device)
+        return a.unsqueeze(0) 
+    
 
     def get_param(self, modules):
         model_params = []
@@ -292,6 +369,10 @@ class Train(nn.Module):
         for param, target_param in zip(self.valueModel.parameters(), self.targetValueModel.parameters()):
             target_param.data.copy_(self.info['target_const'] * param.data + (1 - self.info['target_const'])*target_param.data)
     
+    def update_encoder(self, tau=0.01):
+        with torch.no_grad():
+            for p, p_target in zip(self.encoder.parameters(), self.targetencoder.parameters()):
+                p_target.data.lerp_(p.data, tau)
     
     def _optim_initialize(self):
         self.world_list = [self.encoder, self.rssm, self.rewardModel, self.decoder, self.discountModel]
@@ -306,6 +387,9 @@ class Train(nn.Module):
         
         self.plan2explore_optim = optim.Adam(self.plan2explore.parameters(), self.info['plan2explore_lr'])
 
+        
+	
+        
         
 class RetNorm:
     def __init__(self, decay=1e-2, device='mps'):

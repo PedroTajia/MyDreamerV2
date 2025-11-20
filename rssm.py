@@ -70,6 +70,7 @@ class RSSM(nn.Module):
     def rollout_imag(self, horizon, actor, prev_state):
         state = prev_state
         next_state = []
+        next_hidden_state = []
         action_entropy = []
         imag_log_probs = []
         
@@ -80,10 +81,12 @@ class RSSM(nn.Module):
             # get s_t+1 from s_(t)
             state = self.rssm_image(action, state)
             next_state.append(state)
+            next_hidden_state.append(state[0])
             action_entropy.append(action_dist.entropy())
             # the probability of that action be in the distibution
             imag_log_probs.append(action_dist.log_prob(action.detach()))
         # get into a sequence of states s_t
+        self.next_hidden_state = torch.stack(next_hidden_state, dim=0)
         next_state = self.rssm_stack_states(next_state, dim=0)
         action_entropy = torch.stack(action_entropy, dim=0)
         imag_log_probs = torch.stack(imag_log_probs, dim=0)

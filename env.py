@@ -97,7 +97,7 @@ class RobotSuiteEnv(gym.Env):
         self.renderObs = self.obs
         if self.obs_resize:
            resize = Resize((self.h, self.w))
-           self.obs = torch.tensor(self.obs.transpose(2, 0, 1), dtype=torch.bfloat16) / 255.0
+           self.obs = torch.tensor(self.obs.transpose(2, 0, 1)) / 255.0
            self.obs = resize(self.obs)
         return self.obs.flip(1).to(self.type_obs)
     
@@ -107,7 +107,7 @@ class RobotSuiteEnv(gym.Env):
         self.renderObs = self.obs
         if self.obs_resize:
            resize = Resize((self.h, self.w))
-           self.obs = torch.tensor(self.obs.transpose(2, 0, 1), dtype=torch.bfloat16) / 255.0
+           self.obs = torch.tensor(self.obs.transpose(2, 0, 1)) / 255.0
            self.obs = resize(self.obs)
         
         self.terminal = done
