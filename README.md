@@ -57,7 +57,24 @@ MyDreamerV2/
 ## 🧠 Method (DreamerV2, in short)
 DreamerV2 learns a discrete/structured latent world model (stochastic + deterministic states), optimizes reconstruction/reward/continuation losses with a KL regularizer, and then trains an actor–critic purely from imagined trajectories rolled out in latent space. 
 
-## 📊 Logging & Visualization
-Metrics (losses, returns, KL, reconstruction MSE) and media (episode videos) can be logged to W&B.
+## 📊 Training Performance
 
+Below is the **training episode return** over environment steps for a pixel-based RoboSuite task.
 
+![Training episode return](assets/episode_return.png)
+
+### Interpreting the plot
+
+- **0 – ~50k steps**  
+  Near-zero returns. The agent mainly explores randomly while the world model is inaccurate.
+
+- **~50k – ~150k steps**  
+  Gradual improvement as the RSSM learns meaningful latent dynamics and imagined rollouts become informative.
+
+- **~150k – ~220k steps**  
+  Clear learning signal. Episode returns increase consistently, indicating effective policy learning.
+
+- **~220k+ steps (success regime)**  
+  The agent frequently completes the task. While variance remains high (typical for pixel-based control), the mean return stays well above early-training levels.
+
+**Task success begins around ~180k–200k environment steps**, where returns become consistently positive and structured rather than sparse spikes.
